@@ -29,6 +29,13 @@ cmake -S . -B build
 cmake --build build
 ```
 
+## Releases
+
+GitHub Actions builds release archives for Linux and Windows.
+
+- pushes and pull requests validate the build
+- pushing a tag like `v1.0.0` publishes a GitHub Release with packaged binaries
+
 ## Usage
 
 Linux or macOS:
