@@ -33,7 +33,7 @@ cmake --build build
 
 GitHub Actions builds release archives for Linux and Windows.
 
-- pushes and pull requests validate the build
+- pushes and pull requests run CI builds
 - pushing a tag like `v1.0.0` publishes a GitHub Release with packaged binaries
 
 ## Usage
