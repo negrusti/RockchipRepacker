@@ -71,9 +71,18 @@ jobs:
           Compress-Archive -Path dist\* -DestinationPath "${{ matrix.archive_name }}" -Force
 
       - name: Upload asset to GitHub Release
+        if: runner.os == 'Linux'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" "${{ matrix.archive_name }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
+
+      - name: Upload asset to GitHub Release (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$env:GITHUB_REF_NAME" "${{ matrix.archive_name }}" --repo "$env:GITHUB_REPOSITORY" --clobber
