@@ -6,6 +6,7 @@ This implements a small, practical subset of Rockchip firmware image handling:
 
 - unpack `RKFW` firmware images
 - pack `RKFW` firmware images
+- list `RKFW` and `RKAF` image contents as YAML without unpacking
 - unpack standalone `RKAF` update images
 - pack standalone `RKAF` update images
 - unpack nested `RKAF` payloads found inside `RKFW`
@@ -43,6 +44,7 @@ Linux or macOS:
 ```sh
 ./rkimg unpack input.img outdir
 ./rkimg pack outdir rebuilt.img
+./rkimg list input.img
 ```
 
 Windows:
@@ -50,7 +52,11 @@ Windows:
 ```powershell
 .\build\Debug\rkimg.exe unpack input.img outdir
 .\build\Debug\rkimg.exe pack outdir rebuilt.img
+.\build\Debug\rkimg.exe list input.img
 ```
+
+`list` prints YAML describing the container structure, headers, nested entries,
+and detected second-layer wrappers without extracting files.
 
 ## Unpack Layout
 
