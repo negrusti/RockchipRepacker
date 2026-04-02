@@ -962,6 +962,327 @@ static int load_manifest(const char *dir, Manifest *manifest)
     return manifest->kind == IMAGE_UNKNOWN ? -1 : 0;
 }
 
+static void yaml_indent(FILE *fp, int indent)
+{
+    int i;
+    for (i = 0; i < indent; i++) {
+        fputc(' ', fp);
+    }
+}
+
+static void yaml_print_string(FILE *fp, const char *value)
+{
+    size_t i;
+
+    fputc('"', fp);
+    for (i = 0; value[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)value[i];
+        switch (c) {
+        case '\\':
+        case '"':
+            fputc('\\', fp);
+            fputc((int)c, fp);
+            break;
+        case '\n':
+            fputs("\\n", fp);
+            break;
+        case '\r':
+            fputs("\\r", fp);
+            break;
+        case '\t':
+            fputs("\\t", fp);
+            break;
+        default:
+            if (c < 0x20) {
+                fprintf(fp, "\\x%02x", c);
+            } else {
+                fputc((int)c, fp);
+            }
+            break;
+        }
+    }
+    fputc('"', fp);
+}
+
+static void yaml_kv_string(FILE *fp, int indent, const char *key, const char *value)
+{
+    yaml_indent(fp, indent);
+    fprintf(fp, "%s: ", key);
+    yaml_print_string(fp, value);
+    fputc('\n', fp);
+}
+
+static void yaml_kv_hex32(FILE *fp, int indent, const char *key, uint32_t value)
+{
+    yaml_indent(fp, indent);
+    fprintf(fp, "%s: 0x%08" PRIx32 "\n", key, value);
+}
+
+static void yaml_kv_u64(FILE *fp, int indent, const char *key, uint64_t value)
+{
+    yaml_indent(fp, indent);
+    fprintf(fp, "%s: %" PRIu64 "\n", key, value);
+}
+
+static void yaml_kv_u32(FILE *fp, int indent, const char *key, uint32_t value)
+{
+    yaml_indent(fp, indent);
+    fprintf(fp, "%s: %" PRIu32 "\n", key, value);
+}
+
+static void yaml_kv_bool(FILE *fp, int indent, const char *key, bool value)
+{
+    yaml_indent(fp, indent);
+    fprintf(fp, "%s: %s\n", key, value ? "true" : "false");
+}
+
+static void yaml_key(FILE *fp, int indent, const char *key)
+{
+    yaml_indent(fp, indent);
+    yaml_print_string(fp, key);
+    fputs(":\n", fp);
+}
+
+static int emit_rkaf_yaml_blob(FILE *fp, const uint8_t *blob, size_t blob_size, int indent)
+{
+    uint32_t header_size;
+    uint32_t entry_count;
+    uint32_t image_size;
+    uint32_t stored_crc;
+    char tmp[128];
+    size_t i;
+
+    if (blob_size < 0x800 || memcmp(blob, "RKAF", 4) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    header_size = read_le32(blob + 0x8c + 0x60);
+    if (header_size != 0x1000u) {
+        header_size = 0x800u;
+    }
+    image_size = read_le32(blob + 4);
+    entry_count = read_le32(blob + 136);
+    if (entry_count > RKAF_MAX_ENTRIES) {
+        entry_count = RKAF_MAX_ENTRIES;
+    }
+    stored_crc = image_size + 4u <= blob_size ? read_le32(blob + image_size) : 0;
+
+    yaml_indent(fp, indent);
+    fputs("format: RKAF\n", fp);
+    yaml_indent(fp, indent);
+    fputs("header:\n", fp);
+    copy_trimmed_string(tmp, sizeof(tmp), blob + 8, 34);
+    yaml_kv_string(fp, indent + 2, "model", tmp);
+    copy_trimmed_string(tmp, sizeof(tmp), blob + 42, 30);
+    yaml_kv_string(fp, indent + 2, "id", tmp);
+    copy_trimmed_string(tmp, sizeof(tmp), blob + 72, 56);
+    yaml_kv_string(fp, indent + 2, "manufacturer", tmp);
+    yaml_kv_hex32(fp, indent + 2, "version", read_le32(blob + 132));
+    yaml_kv_hex32(fp, indent + 2, "unknown1", read_le32(blob + 128));
+    yaml_kv_hex32(fp, indent + 2, "header_size", header_size);
+    yaml_kv_u32(fp, indent + 2, "entry_count", entry_count);
+    yaml_kv_hex32(fp, indent + 2, "image_size", image_size);
+    yaml_kv_hex32(fp, indent + 2, "stored_rkcrc", stored_crc);
+
+    yaml_indent(fp, indent);
+    fputs("entries:\n", fp);
+    for (i = 0; i < entry_count; i++) {
+        const uint8_t *entry_buf = blob + 140u + i * RKAF_ENTRY_SIZE;
+        char name[64];
+        char file_name[128];
+        uint32_t pos = read_le32(entry_buf + 96);
+        uint32_t img_size = read_le32(entry_buf + 104);
+        uint32_t orig_size = read_le32(entry_buf + 108);
+        uint32_t nand_size = read_le32(entry_buf + 92);
+        uint32_t nand_addr = read_le32(entry_buf + 100);
+        const char *signed_suffix = NULL;
+        const uint8_t *inner_data = NULL;
+        size_t inner_size = 0;
+        uint32_t stored_size = img_size < orig_size ? (img_size << 11) : img_size;
+
+        copy_trimmed_string(name, sizeof(name), entry_buf + 0, 32);
+        copy_trimmed_string(file_name, sizeof(file_name), entry_buf + 32, 60);
+
+        yaml_key(fp, indent + 2, name);
+        yaml_kv_string(fp, indent + 4, "file_name", file_name);
+        yaml_kv_hex32(fp, indent + 4, "pos", pos);
+        yaml_kv_hex32(fp, indent + 4, "img_size", img_size);
+        yaml_kv_string(fp, indent + 4, "img_size_unit",
+                       img_size < orig_size ? "0x800-byte blocks" : "bytes");
+        yaml_kv_hex32(fp, indent + 4, "stored_size_bytes", stored_size);
+        yaml_kv_hex32(fp, indent + 4, "orig_size", orig_size);
+        yaml_kv_hex32(fp, indent + 4, "nand_size", nand_size);
+        yaml_kv_hex32(fp, indent + 4, "nand_addr", nand_addr);
+
+        if (stored_size > 0 && pos + stored_size <= blob_size - 4u &&
+            unwrap_signed_blob(blob + pos, orig_size, &signed_suffix, &inner_data, &inner_size)) {
+            yaml_kv_string(fp, indent + 4, "second_layer", signed_suffix[1] == 'p' ? "PARM" : "KRNL");
+            yaml_kv_u64(fp, indent + 4, "decoded_size", (uint64_t)inner_size);
+        }
+    }
+
+    return 0;
+}
+
+static int emit_rkfw_yaml_file(FILE *fp, const char *input_path)
+{
+    InputFile in;
+    uint8_t header[RKFW_HEADER_SIZE];
+    uint16_t header_len;
+    uint32_t version;
+    uint32_t code;
+    uint16_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+    uint32_t chip_id;
+    uint32_t load_off;
+    uint32_t load_len;
+    uint32_t data_off;
+    uint32_t data_len;
+    uint32_t unknown1;
+    uint32_t rkfw_type;
+    uint32_t sysfs_type;
+    uint32_t backup_end;
+    uint32_t unknown2;
+    bool append_md5;
+    uint8_t *update_blob = NULL;
+    int rc = -1;
+
+    if (open_input(&in, input_path) != 0) {
+        return -1;
+    }
+    if (in.size < RKFW_HEADER_SIZE || fread(header, 1, sizeof(header), in.fp) != sizeof(header)) {
+        close_input(&in);
+        errno = EINVAL;
+        return -1;
+    }
+    if (memcmp(header, "RKFW", 4) != 0) {
+        close_input(&in);
+        errno = EINVAL;
+        return -1;
+    }
+
+    header_len = read_le16(header + 4);
+    version = read_le32(header + 6);
+    code = read_le32(header + 10);
+    year = read_le16(header + 14);
+    month = header[16];
+    day = header[17];
+    hour = header[18];
+    minute = header[19];
+    second = header[20];
+    chip_id = read_le32(header + 21);
+    load_off = read_le32(header + 25);
+    load_len = read_le32(header + 29);
+    data_off = read_le32(header + 33);
+    data_len = read_le32(header + 37);
+    unknown1 = read_le32(header + 41);
+    rkfw_type = read_le32(header + 45);
+    sysfs_type = read_le32(header + 49);
+    backup_end = read_le32(header + 53);
+    unknown2 = read_le32(header + 98);
+    append_md5 = ((uint64_t)data_off + (uint64_t)data_len + 32u == in.size);
+
+    yaml_kv_string(fp, 0, "format", "RKFW");
+    yaml_kv_string(fp, 0, "path", input_path);
+    yaml_indent(fp, 0);
+    fputs("header:\n", fp);
+    yaml_kv_hex32(fp, 2, "header_len", header_len);
+    yaml_kv_hex32(fp, 2, "version", version);
+    yaml_kv_hex32(fp, 2, "code", code);
+    yaml_indent(fp, 2);
+    fprintf(fp, "datetime: \"%04u-%02u-%02u %02u:%02u:%02u\"\n",
+            (unsigned)year, (unsigned)month, (unsigned)day,
+            (unsigned)hour, (unsigned)minute, (unsigned)second);
+    yaml_kv_hex32(fp, 2, "chip_id", chip_id);
+    yaml_kv_hex32(fp, 2, "load_off", load_off);
+    yaml_kv_hex32(fp, 2, "load_len", load_len);
+    yaml_kv_hex32(fp, 2, "data_off", data_off);
+    yaml_kv_hex32(fp, 2, "data_len", data_len);
+    yaml_kv_hex32(fp, 2, "unknown1", unknown1);
+    yaml_kv_hex32(fp, 2, "rkfw_type", rkfw_type);
+    yaml_kv_hex32(fp, 2, "sysfs_type", sysfs_type);
+    yaml_kv_hex32(fp, 2, "backup_end", backup_end);
+    yaml_kv_hex32(fp, 2, "unknown2", unknown2);
+    yaml_kv_bool(fp, 2, "append_md5", append_md5);
+
+    yaml_indent(fp, 0);
+    fputs("children:\n", fp);
+    yaml_key(fp, 2, "loader.bin");
+    yaml_kv_string(fp, 4, "kind", "loader");
+    yaml_kv_hex32(fp, 4, "offset", load_off);
+    yaml_kv_u64(fp, 4, "size", load_len);
+
+    yaml_key(fp, 2, "update.img");
+    yaml_kv_string(fp, 4, "kind", "update");
+    yaml_kv_hex32(fp, 4, "offset", data_off);
+    yaml_kv_u64(fp, 4, "size", data_len);
+
+    if (seek_file(in.fp, data_off) == 0) {
+        update_blob = (uint8_t *)malloc(data_len);
+        if (update_blob != NULL && fread(update_blob, 1, data_len, in.fp) == data_len &&
+            detect_image_kind(update_blob, data_len) == IMAGE_RKAF) {
+            if (emit_rkaf_yaml_blob(fp, update_blob, data_len, 4) != 0) {
+                goto cleanup;
+            }
+        }
+    }
+
+    rc = 0;
+
+cleanup:
+    free(update_blob);
+    close_input(&in);
+    return rc;
+}
+
+static int emit_rkaf_yaml_file(FILE *fp, const char *input_path)
+{
+    uint8_t *blob = NULL;
+    size_t blob_size = 0;
+    int rc;
+
+    if (slurp_file(input_path, &blob, &blob_size) != 0) {
+        return -1;
+    }
+    yaml_kv_string(fp, 0, "path", input_path);
+    rc = emit_rkaf_yaml_blob(fp, blob, blob_size, 0);
+    free(blob);
+    return rc;
+}
+
+static int list_image_yaml(const char *input_path)
+{
+    InputFile in;
+    uint8_t magic[4];
+    int rc;
+
+    if (open_input(&in, input_path) != 0) {
+        return -1;
+    }
+    if (fread(magic, 1, sizeof(magic), in.fp) != sizeof(magic)) {
+        close_input(&in);
+        errno = EINVAL;
+        return -1;
+    }
+    close_input(&in);
+
+    if (memcmp(magic, "RKFW", 4) == 0) {
+        rc = emit_rkfw_yaml_file(stdout, input_path);
+    } else if (memcmp(magic, "RKAF", 4) == 0) {
+        rc = emit_rkaf_yaml_file(stdout, input_path);
+    } else {
+        errno = EINVAL;
+        rc = -1;
+    }
+
+    return rc;
+}
+
 static int unpack_rkaf_file(const char *input_path, const char *out_dir, RkafManifest *manifest)
 {
     uint8_t *blob = NULL;
@@ -1591,19 +1912,23 @@ static void usage(FILE *fp, const char *argv0)
     fprintf(fp,
             "Usage:\n"
             "  %s unpack <input.img> <output-dir>\n"
-            "  %s pack <input-dir> <output.img>\n\n"
+            "  %s pack <input-dir> <output.img>\n"
+            "  %s list <input.img>\n\n"
             "Supported formats: RKFW and RKAF.\n",
-            argv0, argv0);
+            argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
 {
-    if (argc != 4) {
-        usage(argc == 1 ? stdout : stderr, argv[0]);
-        return argc == 1 ? 0 : 2;
+    if (argc == 3 && strcmp(argv[1], "list") == 0) {
+        if (list_image_yaml(argv[2]) != 0) {
+            fprintf(stderr, "list failed: %s\n", strerror(errno));
+            return 1;
+        }
+        return 0;
     }
 
-    if (strcmp(argv[1], "unpack") == 0) {
+    if (argc == 4 && strcmp(argv[1], "unpack") == 0) {
         if (unpack_image(argv[2], argv[3]) != 0) {
             fprintf(stderr, "unpack failed: %s\n", strerror(errno));
             return 1;
@@ -1611,7 +1936,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (strcmp(argv[1], "pack") == 0) {
+    if (argc == 4 && strcmp(argv[1], "pack") == 0) {
         if (pack_image(argv[2], argv[3]) != 0) {
             fprintf(stderr, "pack failed: %s\n", strerror(errno));
             return 1;
